@@ -53,6 +53,7 @@ pretrained/bigvgan/args.json
 !egs/tts/VALLE/prompt_examples/*.wav
 
 # Runtime data dirs
+ckpt
 processed_data
 data
 model_ckpt

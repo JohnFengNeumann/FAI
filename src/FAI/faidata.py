@@ -9,6 +9,8 @@ from torch.utils.data import Dataset
 import pandas as pd
 import soundfile as sf
 import math
+import torchaudio as ta
+from torch.utils.data import Sampler
 
 # For multiprocessing
 def get_audio_info(params):
@@ -22,6 +24,9 @@ def get_audio_info(params):
         else duration * model_sample_rate / chunk_size
     )
     return audio_path, duration, duration_per_chunksize
+
+
+
 
 class FAIDataset(Dataset):
     def __init__(self, data_path, dataset_type, save_path, read_database_procs = 2, database_path="database.csv", chunk_size_seconds = 0, chunk_size=131584, sample_rate=16000):
@@ -124,4 +129,83 @@ class FAIDataset(Dataset):
         logger.info(f"Database saved to {self.database_path}, {len(database)} rows.")
         return database
 
+    def __len__(self):
+        return len(self.database)
     
+    def __getitem__(self, idx):
+        audio_path = self.database.iloc[idx]['audio_path']
+        save_path = self.database.iloc[idx]['save_path']
+        duration = self.database.iloc[idx]['duration']
+        duration_per_chunksize = self.database.iloc[idx]['duration_per_chunksize']
+        audio, sample_rate = ta.load(audio_path)
+        # stereo to mono
+        if audio.shape[0] == 2:
+            audio = audio.mean(dim=0, keepdim=True)
+        if sample_rate != self.sample_rate:
+            audio = ta.transforms.Resample(sample_rate, self.sample_rate)(audio)
+        return audio_path, save_path, duration, duration_per_chunksize, audio
+    
+    def collact_fn(self, batch):
+        audio_data = []
+        data_info = []
+        start = 0
+        end = 0
+        for audio_path, save_path, duration, duration_per_chunksize, audio in batch:
+            for i in range(0, audio.shape[1], self.chunk_size):
+                chunk_audio = audio[:, i:i+self.chunk_size]
+                if chunk_audio.shape[1] < self.chunk_size:
+                    chunk_audio = ta.transforms.PadTrim(self.chunk_size)(chunk_audio)
+                audio_data.append(chunk_audio)
+            start = end
+            end += duration_per_chunksize
+            data_info.append({
+                'start': start,
+                'end': end,
+                'save_path': save_path
+            })
+            
+        audio_data = ta.transforms.Stack()(audio_data)
+        return {'audio_data': audio_data, 'data_info': data_info}
+            
+
+class FAISampler(Sampler):
+    def __init__(self, data_source: FAIDataset, batch_size):
+        self.data_source = data_source
+        self.data_base = data_source.database.copy()
+        self.batch_size = batch_size
+        self.chunk_size = self.data_source.chunk_size
+        
+    def __iter__(self):
+        # 对数据库副本进行排序，以便优先选取较大的 duration_per_chunksize
+        self.data_base = self.data_base.sort_values(by="duration_per_chunksize", ascending=False).reset_index(drop=True)
+        indices = []  # 存储所有选取的音频索引
+        current_batch = []  # 当前 batch 中的音频索引
+        current_duration = 0  # 当前 batch 的总 duration
+        
+        # 遍历数据，构造批次
+        for idx, row in self.data_base.iterrows():
+            duration = row['duration_per_chunksize']
+            if current_duration + duration <= self.batch_size:
+                # 如果加入当前音频不会超出 batch_size，加入当前 batch
+                current_batch.append(idx)
+                current_duration += duration
+            else:
+                # 如果超出 batch_size，则结束当前 batch，并开始新的 batch
+                if current_batch:  # 确保 batch 不为空
+                    indices.append(current_batch)
+                current_batch = [idx]
+                current_duration = duration
+            
+            # 删除已处理的音频
+            self.data_base.drop(idx, inplace=True)
+        
+        # 处理最后一个 batch（如果有剩余）
+        if current_batch:
+            indices.append(current_batch)
+        
+        # Flatten 所有 batch 的索引列表
+        flat_indices = [item for batch in indices for item in batch]
+        return iter(flat_indices)
+        
+
+            

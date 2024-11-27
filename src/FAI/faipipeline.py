@@ -6,6 +6,7 @@ class FAIPipeline:
     def __init__(
         self,
         extractor,
+        dataloader,
         bunch_size_seconds=0,
         bunch_size=16000,
         init_batch_size=1,
@@ -26,6 +27,7 @@ class FAIPipeline:
             if batch_size_mode == "manual"
             else self.get_max_batch_size()
         )
+        self.dataloader = dataloader
 
     def create_temp_audio(self, batch_size):
         return torch.ones(batch_size, self.bunch_size)
@@ -92,3 +94,16 @@ class FAIPipeline:
 
         logger.info(f"Maximum batch size determined: {max_batch_size}")
         return max_batch_size
+    
+    def extract_feature(self):
+        for batch_data in self.dataloader:
+            audio_data = batch_data['audio_data']
+            features = self.extractor.extract_feature(audio_data)
+            
+            data_info = batch_data['data_info']
+            for d_info in data_info:
+                start, end = d_info['start'], d_info['end']
+                save_path = d_info['save_path']
+                feature = features[start:end].unsqueeze(0)
+                torch.save(feature, save_path)
+            
